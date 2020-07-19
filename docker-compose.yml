@@ -1,0 +1,145 @@
+version: '3'
+services:
+
+#   setup redis to speedup iobroker
+    redis:
+        image: redis:5-alpine
+        restart: always
+        volumes:
+            - redis_data:/data:rw
+        command: ["redis-server", "--appendonly", "yes"]
+#       Fix the TCP Backlog issue
+#       Source: https://github.com/docker-library/redis/issues/35#issuecomment-360810072
+        sysctls:
+            - net.core.somaxconn=511
+#       Ensure the fix is applied ahead of redis starting
+        depends_on:
+            - helper
+#       let watchtower take care of updates for us
+        labels:
+            com.centurylinklabs.watchtower.enable: true
+        hostname: redis
+#       no need to expose redis to the network beyond our stack, so internal only
+        networks:
+            - internal
+
+#   Fix the THP issue of redis automatically and in a manner that works on OSX/Windows hosts too
+#   Source: https://stackoverflow.com/questions/58078237/how-do-you-fix-the-warning-redis-must-be-restarted-after-thp-is-disabled-on-wi
+    helper:
+        image: alpine
+        command: sh -c "echo never > /sys/kernel/mm/transparent_hugepage/enabled"
+        privileged: true
+
+#   setup iobroker itself
+    iobroker:
+        image: buanet/iobroker:v5.0.0
+        restart: always
+        volumes:
+            - iobroker_data:/opt/iobroker:rw
+        ports:
+            - "8081:8081"
+        environment:
+#           remember if you setup the admin port different from 8081, update the ports section!
+            ADMINPORT: 8081
+            AVAHI: "false"
+            LANG: "de_DE.UTF-8"
+            LANGUAGE: "de_DE:de" 
+            LC_ALL: "de_DE.UTF-8"
+#           additional linux tools you might want installed or need.
+#           look up here if its available for alpine and whats it called
+#           https://pkgs.alpinelinux.org/packages
+            PACKAGES: "nano"
+            REDIS: redis:6379
+            SETGID: 1000
+            SETUID: 1000
+#           timezone setting, might need change depending on your location.
+            TZ: "Europe/Berlin"
+            USBDEVICES: "none"
+            ZWAVE: "false"
+#       redis need to run ahead of iobroker, or iobroker won't start up
+        depends_on:
+            - redis
+            - influxdb
+#       disable automatic updates with watchtower, as updates could use manual intervention; node version changes for example
+#       resulting in need to rebuild all plugins 
+        labels:
+            com.centurylinklabs.watchtower.enable: false
+        hostname: iobroker
+#       attach iobroker to the internal network to be able to communicate with redis and the other internal only services
+        networks:
+            - internal
+
+#   setup the timeseries database for iobroker/grafana as a target for history data
+#   please execute the script in ./influxdb to generate passwords for the admin/user accounts before
+#   you first start up the stack
+    influxdb:
+        image: influxdb:alpine
+        restart: always
+        volumes:
+            - influxdb_data:/var/lib/influxdb:rw
+        environment:
+#           setting up config as shown on verdrahtet.info
+#           source: https://www.verdrahtet.info/2020/02/14/installation-von-influxdb-grafana-inkl-verbindung-zu-iobroker/
+            INFLUXDB_HTTP_ENABLED: "true"
+            INFLUXDB_HTTP_BIND_ADRRESS: ':8086'
+            INFLUXDB_HTTP_AUTH_ENABLED: "true"
+            INFLUXDB_HTTP_LOG_ENABLED: "true"
+            INFLUXDB_HTTP_WRITE_TRACING: "false"
+            INFLUXDB_HTTP_PPROF_ENABLED: "false"
+            INFLUXDB_HTTP_HTTPS_ENABLED: "false"
+            INFLUXDB_HTTP_HTTPS_CERTIFICATE: "/etc/ssl/influxdb.pem"
+#           setting up the admin/user accounts, assign db to user
+#           runs only when there is no db present
+            INFLUXDB_ADMIN_USER: "admin"
+            INFLUXDB_USER: "user"
+            INFLUXDB_DB: "iobroker"
+#           disables reporting usage statistics home to InfluxData
+            INFLUXDB_REPORTING_DISABLED: "true"
+#           If you are on a OS which doesnt support bash scripts, just uncomment the following two lines and input a own pass word. Then comment env_file and the following file after that line.
+#           INFLUXDB_ADMIN_PASSWORD: "myownadminpassword"
+#           INFLUXDB_USER_PASSWORD: "myownuserpassword"
+#       getting the generated user/admin passwords from the script
+        env_file:
+            - ./influx_passwords.env
+#       allow watchtower to automatically update our InfluxDB container
+        labels:
+            com.centurylinklabs.watchtower.enable: true
+        hostname: influxdb
+#       attach influxdb to the internal network, no ports exposed to the outside
+        networks:
+            - internal
+        
+    grafana:
+        image: grafana/grafana
+        restart: always
+#       persistant storage, so we can keep data and plugins during restarts
+        volumes:
+            - grafana_data:/var/lib/grafana:rw
+        environment:
+#           prepare the env variable for the grafana plugin installation
+#           if you need any, you can insert them here, seperated by comma
+            GF_INSTALL_PLUGINS: ""
+#       ensure our data source is running, otherwise it would be pointless ;)
+        depends_on:
+            - influxdb
+#       let watchtower take care of updates for us
+        labels:
+            com.centurylinklabs.watchtower.enable: true
+        hostname: grafana        
+#       expose the port, so grafana is reachable
+        ports:
+            - "3000:3000"
+#       attach grafana to the internal network, so the influxdb is reachable
+        networks:
+            - internal 
+         
+            
+networks:
+    internal:
+        driver: bridge
+
+volumes:
+    redis_data:
+    iobroker_data:
+    influxdb_data:
+    grafana_data:
